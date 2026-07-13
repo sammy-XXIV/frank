@@ -11,6 +11,10 @@ export interface GuildConfig {
   projectName?: string;
   /** Channel Frank auto-ingests announcements from. */
   announceChannelId?: string;
+  /** Category whose new channels/threads are treated as support tickets. */
+  ticketCategoryId?: string;
+  /** Role to tag when Frank can't answer and escalates to humans. */
+  modRoleId?: string;
 }
 
 const FILE = path.resolve(process.cwd(), "bot-config.json");

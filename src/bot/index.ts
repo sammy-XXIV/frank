@@ -72,6 +72,15 @@ const commands = [
     )
     .addStringOption((o) =>
       o.setName("docs_text").setDescription("Or paste docs inline (for short docs)")
+    )
+    .addChannelOption((o) =>
+      o
+        .setName("ticket_category")
+        .setDescription("Category where support tickets open — Frank answers them first")
+        .addChannelTypes(ChannelType.GuildCategory)
+    )
+    .addRoleOption((o) =>
+      o.setName("mod_role").setDescription("Role Frank tags when he can't answer / escalates")
     ),
   new SlashCommandBuilder()
     .setName("learn")
@@ -188,11 +197,22 @@ async function handleSetup(i: ChatInputCommandInteraction) {
     return;
   }
 
+  const ticketCategory = i.options.getChannel("ticket_category");
+  const modRole = i.options.getRole("mod_role");
+
   await frank.onboard(projectName, docs);
-  setGuildConfig(i.guildId!, { projectName, announceChannelId: announcements.id });
+  setGuildConfig(i.guildId!, {
+    projectName,
+    announceChannelId: announcements.id,
+    ...(ticketCategory ? { ticketCategoryId: ticketCategory.id } : {}),
+    ...(modRole ? { modRoleId: modRole.id } : {}),
+  });
   await i.editReply(
     `✅ **${projectName}** onboarded (${docs.length.toLocaleString()} chars of docs). ` +
-      `I'll auto-learn from <#${announcements.id}>. Members can /ask or @mention me.`
+      `I'll auto-learn from <#${announcements.id}>.` +
+      (ticketCategory ? ` Answering tickets in **${ticketCategory.name}** first.` : "") +
+      (modRole ? ` Escalating to <@&${modRole.id}>.` : "") +
+      ` Members can /ask or @mention me.`
   );
 }
 
@@ -275,10 +295,53 @@ client.on(Events.InteractionCreate, async (i) => {
   }
 });
 
+// Ticket channels Frank has already given a first answer in — one docs-grounded
+// first response per ticket, then humans take over the thread.
+const answeredTickets = new Set<string>();
+
+function inTicketCategory(msg: Message<true>, categoryId: string): boolean {
+  const ch = msg.channel;
+  if ("parentId" in ch && ch.parentId === categoryId) return true;
+  // Threads under a channel in the category (thread.parent is the channel)
+  if (ch.isThread() && ch.parent && ch.parent.parentId === categoryId) return true;
+  return false;
+}
+
 client.on(Events.MessageCreate, async (msg) => {
   if (msg.author.bot || !msg.inGuild()) return;
 
   const cfg = getGuildConfig(msg.guildId);
+
+  // Ticket first-response: first human message in a ticket channel gets a
+  // docs-grounded answer; if the docs don't cover it, Frank tags the mod
+  // role and steps aside instead of improvising.
+  if (
+    cfg.ticketCategoryId &&
+    inTicketCategory(msg, cfg.ticketCategoryId) &&
+    !answeredTickets.has(msg.channelId) &&
+    msg.content.trim().length > 10 // skip "hi" openers, wait for the actual question
+  ) {
+    answeredTickets.add(msg.channelId);
+    try {
+      await msg.channel.sendTyping();
+      const r = await frank.ask(msg.content);
+      if (r.answered) {
+        await msg.reply(
+          `${r.answer}\n-# ${r.groundedIn} · ${r.confidence} — if this doesn't solve it, a human will follow up.`
+        );
+      } else {
+        const tag = cfg.modRoleId ? `<@&${cfg.modRoleId}> ` : "";
+        await msg.reply(
+          `${tag}This one isn't covered in the project docs — escalating to the team. Hang tight!`
+        );
+      }
+    } catch (err) {
+      answeredTickets.delete(msg.channelId); // let a retry happen if the API hiccuped
+      console.error("ticket-qa failed:", err);
+      await msg.reply(`❌ ${friendlyError(err)}`).catch(() => {});
+    }
+    return;
+  }
 
   // Auto-learn: posts in the announcements channel become knowledge — but only
   // from members with Manage Server. Without this gate, any member posting in
@@ -306,10 +369,11 @@ client.on(Events.MessageCreate, async (msg) => {
     try {
       await msg.channel.sendTyping();
       const r = await frank.ask(question);
+      const modTag = !r.answered && cfg.modRoleId ? ` <@&${cfg.modRoleId}>` : "";
       await msg.reply(
         r.answered
           ? `${r.answer}\n-# ${r.groundedIn} · ${r.confidence}`
-          : `Not covered in this project's docs — a mod can /learn it.`
+          : `Not covered in this project's docs —${modTag} can answer or /learn it.`
       );
     } catch (err) {
       console.error("mention-qa failed:", err);

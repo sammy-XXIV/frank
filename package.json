@@ -7,13 +7,16 @@
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "build": "tsc",
-    "start": "node dist/index.js"
+    "start": "node dist/index.js",
+    "bot": "tsx src/bot/index.ts",
+    "subscribe": "tsx src/bot/subscribe.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.32.0",
     "@okxweb3/app-x402-core": "0.2.0",
     "@okxweb3/app-x402-evm": "^0.2.0",
     "@okxweb3/app-x402-express": "^0.2.0",
+    "discord.js": "^14.26.5",
     "express": "^4.21.0",
     "viem": "^2.21.0",
     "zod": "^3.23.8"

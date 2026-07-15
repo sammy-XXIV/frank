@@ -171,12 +171,18 @@ async function main() {
     termsEnvelope as unknown as Parameters<typeof account.signTypedData>[0]
   );
 
-  // 5. Pay: same request, now with APP-PAYMENT
+  // 5. Pay: same request, now with APP-PAYMENT.
+  // Wire terms carry planId as the PLAIN plan id string — verified against a
+  // known-good payload from OKX's own CLI. The EIP-712 signature is over the
+  // keccak256 hash (bytes32), but the facilitator hashes the plain id itself
+  // when reconstructing the signed struct; sending the hash on the wire makes
+  // it double-hash and reject.
+  const wireTerms = { ...termsEnvelope.message, planId: extra.plan.id as `0x${string}` };
   const paymentHeader = encodePaymentPayload({
     selected,
     permitSingle,
     permitSingleSignature,
-    terms: termsEnvelope.message,
+    terms: wireTerms,
     termsSignature,
   });
 

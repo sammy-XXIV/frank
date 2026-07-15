@@ -1,7 +1,8 @@
 import type { OnBeforeAccessHook, PlanCatalogEntry } from "@okxweb3/app-x402-core/subscription";
 import { OKXFacilitatorClient } from "@okxweb3/app-x402-core";
 import { x402ResourceServer } from "@okxweb3/app-x402-core/server";
-import { InMemoryStore, SubscriptionClient } from "@okxweb3/app-x402-core/subscription";
+import { SubscriptionClient } from "@okxweb3/app-x402-core/subscription";
+import { FileSubscriptionStore, PersistentMap } from "./persist.js";
 import { PermitSubscriptionScheme } from "@okxweb3/app-x402-evm/subscription";
 
 function requireEnv(k: string): string {
@@ -12,9 +13,10 @@ function requireEnv(k: string): string {
 
 export const NETWORK = (process.env.X402_NETWORK ?? "eip155:196") as `eip155:${string}`;
 const PAY_TO = requireEnv("PAY_TO_ADDRESS");
-// X Layer's official settlement stablecoin (USD₮0) — same asset address Fit Check's
-// own 402 response used. Set explicitly; the SDK's "omit -> default" convenience
-// wants a concrete string in this version's types, not undefined.
+// USDT0 — per OKX's A2MCP guide, "official settlement stablecoin on X Layer".
+// This SDK version (0.2.0) requires an explicit asset (parsePrice rejects
+// Money strings and enhancePaymentRequirements fills no default, despite what
+// the newer docs say about omission).
 const DEFAULT_ASSET = process.env.X402_ASSET ?? "0x779ded0c9e1022225f8e0630b35a9b54be713736";
 
 // Single plan for v1: one tier, monthly, covers all three modes (qa/dispute/event).
@@ -41,7 +43,7 @@ export const serverPlan: PlanCatalogEntry = {
     periodCount: 1,
     totalAmount: process.env.FRANK_PRICE_BASE_UNITS ?? DEFAULT_PRICE_BASE_UNITS,
   },
-  name: "Frank — Server Plan",
+  name: "Frank Server Plan", // ASCII only: a non-ASCII char here broke requirement matching (build pipeline mangled it)
 };
 
 // Usage cap so a single heavy server can't cost more in API calls than the flat
@@ -51,9 +53,8 @@ export const serverPlan: PlanCatalogEntry = {
 // with no separate cron needed.
 const MONTHLY_CALL_QUOTA = Number(process.env.FRANK_MONTHLY_CALL_QUOTA ?? "300");
 
-// TODO before real launch: move to a persistent store — same caveat as
-// InMemoryStore above, this resets on every deploy/restart.
-const callCounts = new Map<string, { period: number; count: number }>();
+// Persisted to the data volume — quota survives restarts/redeploys.
+const callCounts = new PersistentMap<{ period: number; count: number }>("quota");
 
 export const quotaGuard: OnBeforeAccessHook = async (ctx) => {
   const { subId, lastChargedPeriod, nextChargeableAt } = ctx.subscription;
@@ -104,17 +105,80 @@ const facilitatorOptions = {
 };
 const facilitator = new OKXFacilitatorClient(facilitatorOptions);
 
-// TODO before real launch: swap InMemoryStore for a persistent store (Postgres/Redis) —
-// subscription state must survive a restart, an in-memory store loses it.
-export const store = new InMemoryStore();
+// TEMP DEBUG: log full facilitator envelopes for subscribe — the SDK surfaces
+// only envelope.msg ("unknown error") and drops the code + details we need to
+// diagnose settle rejections. Remove once the first real subscribe succeeds.
+{
+  const raw = facilitator.subscribe.bind(facilitator);
+  (facilitator as { subscribe: typeof raw }).subscribe = async (...args: Parameters<typeof raw>) => {
+    try {
+      const envelope = await raw(...args);
+      console.error("FACILITATOR subscribe envelope:", JSON.stringify(envelope));
+      return envelope;
+    } catch (err) {
+      console.error("FACILITATOR subscribe threw:", err);
+      throw err;
+    }
+  };
+}
+
+// File-backed on the data volume — subscriptions survive restarts/redeploys.
+// The facilitator-rehydration wrapper below remains as a second safety net.
+export const store = new FileSubscriptionStore();
 export const scheme = new PermitSubscriptionScheme({ facilitator, network: NETWORK, store });
+
+// Restart resilience: after a reboot the InMemoryStore is empty, and the SDK's
+// verifyAccess short-circuits to "subscription_not_active" without consulting
+// the facilitator when the row is missing. Rehydrate from the facilitator
+// (authoritative) on a store miss, then re-verify — so active subscribers
+// survive our redeploys even before we add a persistent store.
+{
+  const rawVerifyAccess = scheme.verifyAccess.bind(scheme);
+  scheme.verifyAccess = async (proof, route) => {
+    const missing = !(await store.get(proof.subId));
+    if (missing) {
+      try {
+        const sub = await scheme.getSubscription(proof.subId);
+        if (sub) await store.put(sub);
+      } catch (err) {
+        console.error(`store rehydration failed for ${proof.subId}:`, err);
+      }
+    }
+    return rawVerifyAccess(proof, route);
+  };
+}
 export const subscriptionClient = new SubscriptionClient({ scheme, store });
 
 export const resourceServer = new x402ResourceServer(facilitator).register(NETWORK, scheme);
 
+// TEMP DEBUG: log matcher inputs whenever requirement matching fails, so we can
+// see exactly which field the server thinks differs. Remove with other debug.
+{
+  const rs = resourceServer as unknown as {
+    findMatchingRequirements: (avail: unknown[], payload: { accepted?: unknown }) => unknown;
+  };
+  const rawMatch = rs.findMatchingRequirements.bind(resourceServer);
+  rs.findMatchingRequirements = (avail, payload) => {
+    const result = rawMatch(avail, payload);
+    if (!result) {
+      console.error("MATCH FAIL server:", JSON.stringify(avail));
+      console.error("MATCH FAIL buyer :", JSON.stringify(payload?.accepted));
+    }
+    return result;
+  };
+}
+
 /** Call once at startup, before serving requests. */
 export async function initPayments(): Promise<void> {
   await resourceServer.initialize();
+  // TEMP DEBUG: dump the facilitator's /supported so we can see which asset(s)
+  // the subscription scheme actually settles in on this network.
+  try {
+    const supported = await facilitator.getSupported();
+    console.error("FACILITATOR /supported:", JSON.stringify(supported));
+  } catch (err) {
+    console.error("FACILITATOR /supported failed:", err);
+  }
 }
 
 /**

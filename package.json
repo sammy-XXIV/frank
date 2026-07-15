@@ -8,8 +8,8 @@
     "dev": "tsx watch src/index.ts",
     "build": "tsc",
     "start": "node dist/index.js",
-    "bot": "tsx src/bot/index.ts",
-    "subscribe": "tsx src/bot/subscribe.ts"
+    "bot": "tsx --env-file=.env src/bot/index.ts",
+    "subscribe": "tsx --env-file=.env src/bot/subscribe.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.32.0",

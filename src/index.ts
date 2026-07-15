@@ -10,15 +10,15 @@ import {
 } from "./subscription.js";
 import { answerQuestion, settleDispute, draftEventPost } from "./reasoning.js";
 import { appendUpdate, MAX_DOCS_CHARS, type ProjectKnowledge } from "./knowledge.js";
+import { PersistentMap } from "./persist.js";
 
 const app = express();
 app.use(express.json());
 
 const PORT = process.env.PORT ?? 3000;
 
-// TODO before real launch: persist this (Postgres/Redis) — an in-memory map loses
-// every server's docs on restart. Same caveat as the subscription InMemoryStore.
-const knowledgeByPayer = new Map<string, ProjectKnowledge>();
+// Persisted to the data volume — docs survive restarts/redeploys.
+const knowledgeByPayer = new PersistentMap<ProjectKnowledge>("knowledge");
 
 app.get("/health", (_req, res) => {
   res.json({ status: "ok" });

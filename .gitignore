@@ -3,3 +3,4 @@ dist/
 .env
 bot-config.json
 data/
+bot.log

@@ -9,6 +9,8 @@ import path from "node:path";
 
 export interface GuildConfig {
   projectName?: string;
+  /** Size of the docs blob last onboarded through this bot (setup card display). */
+  docsChars?: number;
   /** Channel Frank auto-ingests announcements from. */
   announceChannelId?: string;
   /** Category whose new channels/threads are treated as support tickets. */

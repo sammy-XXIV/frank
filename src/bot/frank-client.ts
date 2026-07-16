@@ -1,25 +1,23 @@
 /**
- * Buyer-side client for Frank's paid API.
+ * Buyer-side client for Frank's paid API — pay-per-call "exact" scheme.
  *
- * Every paid call carries an EIP-191 AccessProof in the APP-ACCESS header:
- * keccak256(abi.encodePacked(subId, payer, timestamp)) signed by the payer
- * wallet — the same message `AccessProofVerifier` reconstructs server-side
- * (verified against @okxweb3/app-x402-evm dist, not guessed). Proofs are
- * replay-bounded to a ±300s window, so one is signed fresh per request.
- *
- * Requires an ALREADY-ACTIVE subscription (the subscribe flow itself — permit2
- * + terms signing — is a separate one-time step, not done here).
+ * Flow per request: POST → 402 challenge (PAYMENT-REQUIRED header) → SDK signs
+ * an EIP-3009 transferWithAuthorization for the listed price with the bot's
+ * wallet → retry with PAYMENT-SIGNATURE header → 200 + PAYMENT-RESPONSE
+ * (settlement receipt, incl. on-chain tx hash). All signing is silent and
+ * off-chain; settlement happens facilitator-side on X Layer.
  */
-import {
-  buildAccessProofMessage,
-  encodeAccessProof,
-} from "@okxweb3/app-x402-core/subscription";
+import { x402Client, x402HTTPClient } from "@okxweb3/app-x402-core/client";
+import { registerExactEvmScheme } from "@okxweb3/app-x402-evm/exact/client";
+import { createPublicClient, erc20Abi, formatUnits, http } from "viem";
 import { privateKeyToAccount, type PrivateKeyAccount } from "viem/accounts";
+import { xLayer } from "viem/chains";
+
+const USDT0 = "0x779ded0c9e1022225f8e0630b35a9b54be713736" as const;
 
 export interface FrankClientConfig {
   baseUrl: string; // e.g. https://frank-production-83d3.up.railway.app
-  subId: `0x${string}`; // subscription id from the subscribe flow
-  privateKey: `0x${string}`; // payer wallet key — the wallet that subscribed
+  privateKey: `0x${string}`; // payer wallet key — funds each call
 }
 
 export interface QaResult {
@@ -44,6 +42,13 @@ export interface EventResult {
   groundedInTone: string;
 }
 
+export interface Settlement {
+  path: string;
+  at: number;
+  /** Decoded PAYMENT-RESPONSE from the seller (tx hash etc.), if present. */
+  receipt: unknown;
+}
+
 export class FrankApiError extends Error {
   constructor(
     public status: number,
@@ -55,43 +60,75 @@ export class FrankApiError extends Error {
 
 export class FrankClient {
   private account: PrivateKeyAccount;
+  private http: x402HTTPClient;
+  /** Most recent settlement receipt — handy for demo logging. */
+  lastSettlement: Settlement | null = null;
 
   constructor(private cfg: FrankClientConfig) {
     this.account = privateKeyToAccount(cfg.privateKey);
+    const client = new x402Client();
+    registerExactEvmScheme(client, { signer: this.account });
+    this.http = new x402HTTPClient(client);
   }
 
   get payer(): string {
     return this.account.address;
   }
 
-  private async accessHeader(): Promise<string> {
-    const timestamp = Math.floor(Date.now() / 1000);
-    const message = buildAccessProofMessage({
-      subId: this.cfg.subId,
-      payer: this.account.address,
-      timestamp,
+  /** USDT0 balance of the paying wallet, human units (e.g. "12.35"). */
+  async balance(): Promise<string> {
+    const chainClient = createPublicClient({
+      chain: xLayer,
+      transport: http(process.env.XLAYER_RPC_URL ?? "https://rpc.xlayer.tech"),
     });
-    const signature = await this.account.signMessage({ message: { raw: message } });
-    return encodeAccessProof({
-      kind: "subscription-id",
-      subId: this.cfg.subId,
-      payer: this.account.address,
-      timestamp,
-      signature,
+    const raw = await chainClient.readContract({
+      address: USDT0,
+      abi: erc20Abi,
+      functionName: "balanceOf",
+      args: [this.account.address],
     });
+    return formatUnits(raw, 6);
   }
 
   private async post<T>(path: string, body: unknown): Promise<T> {
-    const res = await fetch(`${this.cfg.baseUrl}${path}`, {
+    const url = `${this.cfg.baseUrl}${path}`;
+    const init = {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "APP-ACCESS": await this.accessHeader(),
-      },
+      headers: { "Content-Type": "application/json" } as Record<string, string>,
       body: JSON.stringify(body),
-    });
+    };
+
+    let res = await fetch(url, init);
+
+    if (res.status === 402) {
+      // Decode challenge, sign the per-call payment, retry once.
+      const paymentRequired = this.http.getPaymentRequiredResponse((name) =>
+        res.headers.get(name)
+      );
+      const payload = await this.http.createPaymentPayload(paymentRequired);
+      const payHeaders = this.http.encodePaymentSignatureHeader(payload);
+      res = await fetch(url, {
+        ...init,
+        headers: { ...init.headers, ...payHeaders },
+      });
+    }
+
     const json = (await res.json().catch(() => ({}))) as unknown;
     if (!res.ok) throw new FrankApiError(res.status, json);
+
+    const receiptHeader = res.headers.get("payment-response");
+    if (receiptHeader) {
+      try {
+        this.lastSettlement = {
+          path,
+          at: Date.now(),
+          receipt: JSON.parse(Buffer.from(receiptHeader, "base64").toString("utf8")),
+        };
+        console.log(`[frank-client] paid ${path}:`, JSON.stringify(this.lastSettlement.receipt));
+      } catch {
+        // receipt is informational only — never fail the call over it
+      }
+    }
     return json as T;
   }
 

@@ -37,7 +37,6 @@ function requireEnv(k: string): string {
 
 const frank = new FrankClient({
   baseUrl: requireEnv("FRANK_URL"),
-  subId: requireEnv("FRANK_SUB_ID") as `0x${string}`,
   privateKey: requireEnv("PAYER_PRIVATE_KEY") as `0x${string}`,
 });
 
@@ -55,17 +54,14 @@ const client = new Client({
 const commands = [
   new SlashCommandBuilder()
     .setName("setup")
-    .setDescription("Onboard this server: give Frank your docs and pick an announcements channel.")
+    .setDescription("Set up Frank — run with no options to see what's configured and what's next.")
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
-    .addStringOption((o) =>
-      o.setName("project_name").setDescription("Your project's name").setRequired(true)
-    )
+    .addStringOption((o) => o.setName("project_name").setDescription("Your project's name"))
     .addChannelOption((o) =>
       o
         .setName("announcements")
         .setDescription("Channel Frank auto-learns updates from")
         .addChannelTypes(ChannelType.GuildText)
-        .setRequired(true)
     )
     .addAttachmentOption((o) =>
       o.setName("docs_file").setDescription("Text/markdown file with rules, FAQ, tone guide")
@@ -180,40 +176,68 @@ async function executeDisputeAction(
 
 // ---------- interaction handlers ----------
 
+/**
+ * Guided setup. Bare `/setup` = status card showing what's configured, the
+ * wallet balance, and the single next step. With options = apply them
+ * incrementally (nothing already configured is ever required again).
+ */
 async function handleSetup(i: ChatInputCommandInteraction) {
   await i.deferReply();
-  const projectName = i.options.getString("project_name", true);
-  const announcements = i.options.getChannel("announcements", true);
+  const cfg = getGuildConfig(i.guildId!);
+
+  const projectName = i.options.getString("project_name");
+  const announcements = i.options.getChannel("announcements");
+  const ticketCategory = i.options.getChannel("ticket_category");
+  const modRole = i.options.getRole("mod_role");
   const file = i.options.getAttachment("docs_file");
   const inline = i.options.getString("docs_text");
 
-  let docs = inline ?? "";
-  if (file) {
-    const res = await fetch(file.url);
-    docs = await res.text();
+  // Apply whatever was provided this run.
+  let docsApplied = 0;
+  if (file || inline) {
+    let docs = inline ?? "";
+    if (file) {
+      const res = await fetch(file.url);
+      docs = await res.text();
+    }
+    const name = projectName ?? cfg.projectName;
+    if (!name) {
+      await i.editReply("Add `project_name` alongside the docs so I know who I work for.");
+      return;
+    }
+    await frank.onboard(name, docs); // paid call ($0.01) from the bot wallet
+    docsApplied = docs.length;
   }
-  if (!docs.trim()) {
-    await i.editReply("Give me docs — either attach a text file or use `docs_text`.");
-    return;
-  }
-
-  const ticketCategory = i.options.getChannel("ticket_category");
-  const modRole = i.options.getRole("mod_role");
-
-  await frank.onboard(projectName, docs);
-  setGuildConfig(i.guildId!, {
-    projectName,
-    announceChannelId: announcements.id,
+  const updated = setGuildConfig(i.guildId!, {
+    ...(projectName ? { projectName } : {}),
+    ...(docsApplied ? { docsChars: docsApplied } : {}),
+    ...(announcements ? { announceChannelId: announcements.id } : {}),
     ...(ticketCategory ? { ticketCategoryId: ticketCategory.id } : {}),
     ...(modRole ? { modRoleId: modRole.id } : {}),
   });
-  await i.editReply(
-    `✅ **${projectName}** onboarded (${docs.length.toLocaleString()} chars of docs). ` +
-      `I'll auto-learn from <#${announcements.id}>.` +
-      (ticketCategory ? ` Answering tickets in **${ticketCategory.name}** first.` : "") +
-      (modRole ? ` Escalating to <@&${modRole.id}>.` : "") +
-      ` Members can /ask or @mention me.`
-  );
+
+  // Status card + next step.
+  const balance = await frank.balance().catch(() => "?");
+  const funded = balance !== "?" && Number(balance) > 0;
+  const check = (ok: unknown) => (ok ? "✅" : "▫️");
+  const lines = [
+    `**Frank setup — ${updated.projectName ?? "unnamed project"}**`,
+    `${check(funded)} Wallet: \`${frank.payer}\` — ${balance} USDT0${funded ? "" : " (top up to activate — ~$5 covers ~100 questions)"}`,
+    `${check(updated.docsChars)} Project docs${updated.docsChars ? ` — ${updated.docsChars.toLocaleString()} chars on file` : ""}`,
+    `${check(updated.announceChannelId)} Announcements auto-learn${updated.announceChannelId ? ` — <#${updated.announceChannelId}>` : ""}`,
+    `${check(updated.ticketCategoryId)} Ticket first-response *(optional)*${updated.ticketCategoryId ? ` — <#${updated.ticketCategoryId}>` : ""}`,
+    `${check(updated.modRoleId)} Mod escalation role *(optional)*${updated.modRoleId ? ` — <@&${updated.modRoleId}>` : ""}`,
+  ];
+
+  let next = "";
+  if (!funded) next = `**Next:** send USDT0 (X Layer) to \`${frank.payer}\``;
+  else if (!updated.docsChars)
+    next = "**Next:** `/setup project_name:<name> docs_file:<attach your rules/FAQ file>`";
+  else if (!updated.announceChannelId)
+    next = "**Next:** `/setup announcements:#your-announcements-channel`";
+  else next = "All set — members can `/ask` or @mention me. Mods: `/dispute`, `/event`, `/learn`.";
+
+  await i.editReply(`${lines.join("\n")}\n\n${next}`);
 }
 
 async function handleLearn(i: ChatInputCommandInteraction) {

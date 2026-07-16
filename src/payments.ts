@@ -1,5 +1,6 @@
 import { OKXFacilitatorClient } from "@okxweb3/app-x402-core";
 import { x402ResourceServer } from "@okxweb3/app-x402-core/server";
+import { AggrDeferredEvmScheme } from "@okxweb3/app-x402-evm/deferred/server";
 import { ExactEvmScheme } from "@okxweb3/app-x402-evm/exact/server";
 import type express from "express";
 
@@ -42,6 +43,28 @@ export function exactAccept(amountBaseUnits: string) {
   };
 }
 
+/**
+ * Second accepted method: aggr_deferred ("batch"). Same per-call price; the
+ * buyer signs with an Agentic Wallet session key and OKX's facilitator batches
+ * settlements on-chain asynchronously. Seller-side handling is identical to
+ * exact (verify → deliver); the sessionCert lives in the buyer's payload and
+ * is forwarded verbatim — it must NOT appear here in the requirements.
+ */
+export function aggrDeferredAccept(amountBaseUnits: string) {
+  return {
+    scheme: "aggr_deferred" as const,
+    network: NETWORK,
+    payTo: PAY_TO,
+    price: { amount: amountBaseUnits, asset: ASSET },
+    extra: { name: "USD₮0", version: "1" },
+  };
+}
+
+/** Both accepted payment options for a route, exact first (recommended default). */
+export function acceptsFor(amountBaseUnits: string) {
+  return [exactAccept(amountBaseUnits), aggrDeferredAccept(amountBaseUnits)];
+}
+
 const facilitatorOptions = {
   apiKey: requireEnv("OKX_API_KEY"),
   secretKey: requireEnv("OKX_SECRET_KEY"),
@@ -52,10 +75,9 @@ const facilitatorOptions = {
 };
 const facilitator = new OKXFacilitatorClient(facilitatorOptions);
 
-export const resourceServer = new x402ResourceServer(facilitator).register(
-  NETWORK,
-  new ExactEvmScheme()
-);
+export const resourceServer = new x402ResourceServer(facilitator)
+  .register(NETWORK, new ExactEvmScheme())
+  .register(NETWORK, new AggrDeferredEvmScheme());
 
 /** Call once at startup, before serving requests. */
 export async function initPayments(): Promise<void> {

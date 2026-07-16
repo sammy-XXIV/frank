@@ -1,7 +1,7 @@
 import express from "express";
 import { paymentMiddleware } from "@okxweb3/app-x402-express";
 import {
-  exactAccept,
+  acceptsFor,
   initPayments,
   payerOf,
   PRICE_BASE_UNITS,
@@ -25,28 +25,28 @@ app.get("/health", (_req, res) => {
 
 const routes = {
   "POST /onboard": {
-    accepts: [exactAccept(PRICE_BASE_UNITS.onboard)],
+    accepts: acceptsFor(PRICE_BASE_UNITS.onboard),
     description: "Set or update your project's docs/rules that Frank grounds every answer in.",
     mimeType: "application/json",
   },
   "POST /learn": {
-    accepts: [exactAccept(PRICE_BASE_UNITS.learn)],
+    accepts: acceptsFor(PRICE_BASE_UNITS.learn),
     description:
       "Teach Frank an incremental update (announcement, rule change) without re-uploading all docs.",
     mimeType: "application/json",
   },
   "POST /qa": {
-    accepts: [exactAccept(PRICE_BASE_UNITS.qa)],
+    accepts: acceptsFor(PRICE_BASE_UNITS.qa),
     description: "Answer a member question using your project's own docs.",
     mimeType: "application/json",
   },
   "POST /dispute": {
-    accepts: [exactAccept(PRICE_BASE_UNITS.dispute)],
+    accepts: acceptsFor(PRICE_BASE_UNITS.dispute),
     description: "Adjudicate a dispute transcript against your project's actual rules.",
     mimeType: "application/json",
   },
   "POST /event": {
-    accepts: [exactAccept(PRICE_BASE_UNITS.event)],
+    accepts: acceptsFor(PRICE_BASE_UNITS.event),
     description: "Draft an event announcement in your project's established tone.",
     mimeType: "application/json",
   },

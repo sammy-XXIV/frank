@@ -1,13 +1,12 @@
 import express from "express";
 import { paymentMiddleware } from "@okxweb3/app-x402-express";
 import {
+  exactAccept,
   initPayments,
-  quotaGuard,
+  payerOf,
+  PRICE_BASE_UNITS,
   resourceServer,
-  serverPlan,
-  startChargeLoop,
-  toAccept,
-} from "./subscription.js";
+} from "./payments.js";
 import { answerQuestion, settleDispute, draftEventPost } from "./reasoning.js";
 import { appendUpdate, MAX_DOCS_CHARS, type ProjectKnowledge } from "./knowledge.js";
 import { PersistentMap } from "./persist.js";
@@ -26,51 +25,34 @@ app.get("/health", (_req, res) => {
 
 const routes = {
   "POST /onboard": {
-    accepts: [toAccept(serverPlan)],
+    accepts: [exactAccept(PRICE_BASE_UNITS.onboard)],
     description: "Set or update your project's docs/rules that Frank grounds every answer in.",
     mimeType: "application/json",
   },
-  // No quotaGuard on /learn or /onboard — neither calls Claude, so they cost
-  // nothing per hit; the quota only meters the three LLM routes.
   "POST /learn": {
-    accepts: [toAccept(serverPlan)],
+    accepts: [exactAccept(PRICE_BASE_UNITS.learn)],
     description:
       "Teach Frank an incremental update (announcement, rule change) without re-uploading all docs.",
     mimeType: "application/json",
   },
   "POST /qa": {
-    accepts: [toAccept(serverPlan)],
+    accepts: [exactAccept(PRICE_BASE_UNITS.qa)],
     description: "Answer a member question using your project's own docs.",
     mimeType: "application/json",
-    onBeforeAccess: quotaGuard,
   },
   "POST /dispute": {
-    accepts: [toAccept(serverPlan)],
+    accepts: [exactAccept(PRICE_BASE_UNITS.dispute)],
     description: "Adjudicate a dispute transcript against your project's actual rules.",
     mimeType: "application/json",
-    onBeforeAccess: quotaGuard,
   },
   "POST /event": {
-    accepts: [toAccept(serverPlan)],
+    accepts: [exactAccept(PRICE_BASE_UNITS.event)],
     description: "Draft an event announcement in your project's established tone.",
     mimeType: "application/json",
-    onBeforeAccess: quotaGuard,
-  },
-  "POST /subscription/cancel": {
-    accepts: [toAccept(serverPlan)],
-    description: "Cancel your Frank subscription.",
-    mimeType: "application/json",
-    operation: "cancel" as const,
   },
 };
 
 app.use(paymentMiddleware(routes, resourceServer));
-
-function payerOf(req: express.Request): string {
-  const payer = (req as any).x402?.subscription?.payer as string | undefined;
-  if (!payer) throw new Error("no subscription context on request");
-  return payer;
-}
 
 app.post("/onboard", (req, res) => {
   const { projectName, docs } = req.body as { projectName?: string; docs?: string };
@@ -161,10 +143,6 @@ app.post("/event", async (req, res) => {
   }
 });
 
-app.post("/subscription/cancel", (_req, res) => {
-  res.json({ ok: true });
-});
-
 // 405 for non-POST hits on action routes, per x402 endpoint convention
 // (learned from Fit Check's rejection — Express's default 404 isn't compliant).
 for (const path of ["/onboard", "/learn", "/qa", "/dispute", "/event"]) {
@@ -174,7 +152,6 @@ for (const path of ["/onboard", "/learn", "/qa", "/dispute", "/event"]) {
 }
 
 await initPayments();
-startChargeLoop();
 
 app.listen(PORT, () => {
   console.log(`Frank listening on port ${PORT}`);

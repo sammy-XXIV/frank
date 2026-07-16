@@ -1,0 +1,5 @@
+
+> frank@0.1.0 bot
+> tsx --env-file=.env src/bot/index.ts
+
+Frank bridge online as FRANK#4784, payer 0xF6219d8E251DcDeEB1551840a58E03E107EC8caF

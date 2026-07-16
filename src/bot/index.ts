@@ -382,4 +382,14 @@ client.on(Events.MessageCreate, async (msg) => {
   }
 });
 
+// Last-resort safety net: a stray Discord API rejection (e.g. an interaction
+// that expired before we could reply — code 10062) must never take the whole
+// bot down mid-demo. Log and keep serving.
+process.on("unhandledRejection", (reason) => {
+  console.error("unhandledRejection (ignored, bot stays up):", reason);
+});
+process.on("uncaughtException", (err) => {
+  console.error("uncaughtException (ignored, bot stays up):", err);
+});
+
 client.login(requireEnv("DISCORD_TOKEN"));
